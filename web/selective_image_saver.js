@@ -3,6 +3,7 @@ import { api } from "../../scripts/api.js";
 
 const SLOT_RE = /^image_\d+$/;
 const GAP = 4;
+const SIZE_LINE = 16;
 const MIN_PREVIEW = 100;
 const DEFAULT_PREVIEW = 300;
 const DEFAULT_FORMAT = "ComfyUI_%counter%";
@@ -19,8 +20,10 @@ const FORMAT_HELP = [
 const STYLE = `
 .st-wrap { display: flex; flex-direction: column; gap: 6px; padding: 4px; box-sizing: border-box; overflow: hidden; }
 .st-gallery { flex: 1 1 0; min-height: 0; display: grid; gap: ${GAP}px; }
-.st-cell { position: relative; min-width: 0; min-height: 0; }
-.st-cell img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; cursor: pointer; }
+.st-cell { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.st-frame { position: relative; flex: none; }
+.st-frame img { display: block; width: 100%; height: 100%; cursor: pointer; }
+.st-size { flex: none; height: ${SIZE_LINE}px; line-height: ${SIZE_LINE}px; font-size: 11px; opacity: 0.7; color: var(--fg-color, #ddd); white-space: nowrap; }
 .st-caption { position: absolute; left: 2px; top: 2px; max-width: calc(100% - 12px); padding: 0 4px; border-radius: 3px; font-size: 11px; background: #000a; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
 .st-controls { flex: none; display: flex; flex-direction: column; gap: 6px; }
 .st-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
@@ -98,24 +101,27 @@ function previewUrl(preview) {
     return api.apiURL(`/view?${params}`);
 }
 
-// Picks the column count that shows the images the largest in the available area, like the core image preview.
+// Picks the column count that shows the images the largest in the available area, like the core image preview,
+// then sizes each image frame so its size line sits right under the image.
 function layoutGallery(gallery) {
     const imgs = [...gallery.querySelectorAll("img")];
     const width = gallery.clientWidth;
     const height = gallery.clientHeight;
     if (!imgs.length || !width || !height) return;
+    const cellSize = (cols) => {
+        const rows = Math.ceil(imgs.length / cols);
+        return [Math.max(0, (width - GAP * (cols - 1)) / cols), Math.max(0, (height - GAP * (rows - 1)) / rows - SIZE_LINE)];
+    };
+    const fit = (img, cellWidth, cellHeight) => {
+        const ratio = img.naturalWidth / img.naturalHeight || 1;
+        const w = Math.min(cellWidth, cellHeight * ratio);
+        return [w, w / ratio];
+    };
     let bestArea = -1;
     let bestCols = 1;
     for (let cols = 1; cols <= imgs.length; cols++) {
-        const rows = Math.ceil(imgs.length / cols);
-        const cellWidth = Math.max(0, (width - GAP * (cols - 1)) / cols);
-        const cellHeight = Math.max(0, (height - GAP * (rows - 1)) / rows);
-        let area = 0;
-        for (const img of imgs) {
-            const ratio = img.naturalWidth / img.naturalHeight || 1;
-            const w = Math.min(cellWidth, cellHeight * ratio);
-            area += (w * w) / ratio;
-        }
+        const [cellWidth, cellHeight] = cellSize(cols);
+        const area = imgs.reduce((sum, img) => { const [w, h] = fit(img, cellWidth, cellHeight); return sum + w * h; }, 0);
         if (area > bestArea) {
             bestArea = area;
             bestCols = cols;
@@ -123,6 +129,12 @@ function layoutGallery(gallery) {
     }
     gallery.style.gridTemplateColumns = `repeat(${bestCols}, minmax(0, 1fr))`;
     gallery.style.gridTemplateRows = `repeat(${Math.ceil(imgs.length / bestCols)}, minmax(0, 1fr))`;
+    const [cellWidth, cellHeight] = cellSize(bestCols);
+    for (const img of imgs) {
+        const [w, h] = fit(img, cellWidth, cellHeight);
+        img.parentElement.style.width = `${Math.floor(w)}px`;
+        img.parentElement.style.height = `${Math.floor(h)}px`;
+    }
 }
 
 // Rebuilds the previews only when the output's files changed, so cached reruns keep the save status.
@@ -157,14 +169,19 @@ function renderGallery(node) {
         const list = previews[slot] ?? [];
         list.forEach((p, i) => {
             const src = previewUrl(p);
+            const size = el("div", { className: "st-size" });
             const img = el("img", {
                 src,
                 title: "Ouvrir en taille réelle",
                 onclick: () => window.open(src, "_blank"),
-                onload: () => layoutGallery(gallery),
+                onload: () => {
+                    size.textContent = `${img.naturalWidth} x ${img.naturalHeight}`;
+                    layoutGallery(gallery);
+                },
             });
             const caption = list.length > 1 ? `${slot} (${i + 1}/${list.length})` : slot;
-            cells.push(el("div", { className: "st-cell" }, [img, el("div", { className: "st-caption", textContent: caption })]));
+            const frame = el("div", { className: "st-frame" }, [img, el("div", { className: "st-caption", textContent: caption })]);
+            cells.push(el("div", { className: "st-cell" }, [frame, size]));
         });
     }
     gallery.replaceChildren(...cells);
