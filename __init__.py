@@ -70,6 +70,7 @@ class SelectiveImageSaver:
                 for x in extra_pnginfo:
                     metadata.add_text(x, json.dumps(extra_pnginfo[x]))
 
+        workflow = ((extra_pnginfo or {}).get("workflow") or {}).get("id")
         temp_dir = folder_paths.get_temp_directory()
         os.makedirs(temp_dir, exist_ok=True)
         previews = []
@@ -81,7 +82,7 @@ class SelectiveImageSaver:
                 img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
                 filename = f"saving_tools_{uuid.uuid4().hex}.png"
                 img.save(os.path.join(temp_dir, filename), pnginfo=metadata, compress_level=4)
-                previews.append({"slot": f"image_{slot}", "filename": filename, "subfolder": "", "type": "temp"})
+                previews.append({"slot": f"image_{slot}", "filename": filename, "subfolder": "", "type": "temp", "workflow": workflow})
 
         result = tuple(images.get(i) for i in range(1, max(images, default=0) + 1))
         return {"ui": {"previews": previews}, "result": result}
@@ -144,6 +145,18 @@ async def save_previews(request):
     except OSError as e:
         return web.json_response({"error": str(e)}, status=400)
     return web.json_response({"files": targets})
+
+
+@PromptServer.instance.routes.get("/saving_tools/previews")
+async def last_previews(request):
+    # The last finished run of this node in this workflow, so the frontend can show it again after a tab switch.
+    workflow, node = request.query["workflow"], request.query["node"]
+    for entry in reversed(PromptServer.instance.prompt_queue.get_history().values()):
+        extra_pnginfo = entry["prompt"][3].get("extra_pnginfo") or {}
+        output = entry["outputs"].get(node)
+        if (extra_pnginfo.get("workflow") or {}).get("id") == workflow and output and "previews" in output:
+            return web.json_response(output["previews"])
+    return web.json_response([])
 
 
 @PromptServer.instance.routes.post("/saving_tools/pick_folder")

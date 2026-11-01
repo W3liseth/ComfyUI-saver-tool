@@ -125,6 +125,31 @@ function layoutGallery(gallery) {
     gallery.style.gridTemplateRows = `repeat(${Math.ceil(imgs.length / bestCols)}, minmax(0, 1fr))`;
 }
 
+// Rebuilds the previews only when the output's files changed, so cached reruns keep the save status.
+function syncPreviews(node, output) {
+    const state = node.savingTools;
+    const key = (output?.previews ?? []).map((p) => p.filename).join("|");
+    if (key === state.previewKey) return;
+    state.previewKey = key;
+    state.previews = {};
+    for (const p of output?.previews ?? []) (state.previews[p.slot] ??= []).push(p);
+    state.status = {};
+    renderGallery(node);
+    renderControls(node);
+}
+
+// The node is rebuilt when switching workflow tabs, and a run that finishes while another tab is open never reaches
+// it, so the last finished run is read back from the ComfyUI history. Only nodes of the main graph are looked up.
+async function loadPreviews(node) {
+    if (node.graph !== app.rootGraph) return;
+    const state = node.savingTools;
+    const version = state.version;
+    const params = new URLSearchParams({ workflow: node.graph.id, node: String(node.id) });
+    const previews = await (await api.fetchApi(`/saving_tools/previews?${params}`)).json();
+    // A newer run shown by onExecuted meanwhile wins over the history.
+    if (version === state.version && previews.length) syncPreviews(node, { previews });
+}
+
 function renderGallery(node) {
     const { gallery, previews } = node.savingTools;
     const cells = [];
@@ -274,6 +299,10 @@ app.registerExtension({
     name: "saving-tools.SelectiveImageSaver",
     setup() {
         document.head.append(el("style", { textContent: STYLE }));
+        // The queue status changes when a run is stored in the history, including runs that finished in another tab.
+        api.addEventListener("status", () => {
+            for (const node of app.rootGraph.nodes) if (node.savingTools) loadPreviews(node);
+        });
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name !== "SelectiveImageSaver") return;
@@ -283,7 +312,7 @@ app.registerExtension({
             const r = onNodeCreated?.apply(this, arguments);
             const gallery = el("div", { className: "st-gallery", style: "display: none" });
             const controls = el("div", { className: "st-controls" });
-            const state = { gallery, controls, controlsHeight: 30, previews: {}, status: {}, busy: {}, queued: false };
+            const state = { gallery, controls, controlsHeight: 30, previews: {}, previewKey: "", version: 0, status: {}, busy: {}, queued: false };
             this.savingTools = state;
             this.properties.filenameFormat ??= DEFAULT_FORMAT;
             this.addDOMWidget("saving_tools", "saving_tools", el("div", { className: "st-wrap" }, [gallery, controls]), {
@@ -313,19 +342,18 @@ app.registerExtension({
         nodeType.prototype.onConfigure = function () {
             const r = onConfigure?.apply(this, arguments);
             scheduleUpdate(this);
+            setTimeout(() => loadPreviews(this), 0);
             return r;
         };
 
         const onExecuted = nodeType.prototype.onExecuted;
         nodeType.prototype.onExecuted = function (output) {
             const r = onExecuted?.apply(this, arguments);
-            const state = this.savingTools;
-            const hadPreviews = state.gallery.childElementCount > 0;
-            state.previews = {};
-            for (const p of output?.previews ?? []) (state.previews[p.slot] ??= []).push(p);
-            state.status = {};
-            renderGallery(this);
-            renderControls(this);
+            // A run that finishes while another workflow tab is open is delivered to the node with the same id there.
+            if (output?.previews?.some((p) => p.workflow && p.workflow !== app.rootGraph.id)) return r;
+            const hadPreviews = this.savingTools.gallery.childElementCount > 0;
+            this.savingTools.version++;
+            syncPreviews(this, output);
             // First previews: give them a comfortable default size, like the core image preview.
             fitHeight(this, hadPreviews ? 0 : DEFAULT_PREVIEW - MIN_PREVIEW);
             return r;
