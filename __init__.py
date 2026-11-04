@@ -17,6 +17,8 @@ from PIL.PngImagePlugin import PngInfo
 
 import folder_paths
 from comfy.cli_args import args
+from comfy_api.latest import io
+from comfy_execution.utils import get_executing_context
 from server import PromptServer
 
 SLOT_RE = re.compile(r"image_(\d+)")
@@ -77,6 +79,9 @@ class SelectiveImageSaver:
         for slot in sorted(images):
             if images[slot] is None:
                 continue
+            if f"preview_image_{slot}" in inputs:
+                previews.extend(inputs[f"preview_image_{slot}"])
+                continue
             for image in images[slot]:
                 i = 255. * image.cpu().numpy()
                 img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
@@ -86,6 +91,34 @@ class SelectiveImageSaver:
 
         result = tuple(images.get(i) for i in range(1, max(images, default=0) + 1))
         return {"ui": {"previews": previews}, "result": result}
+
+
+class SavingToolsPreview(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="SavingToolsPreview",
+            inputs=[io.Image.Input("image"), io.String.Input("slot"), io.String.Input("node_id")],
+            outputs=[io.Image.Output(is_output_list=True), io.AnyType.Output(is_output_list=True)],
+            hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo],
+            is_input_list=True,
+            is_output_node=True,
+            is_dev_only=True,
+        )
+
+    @classmethod
+    def execute(cls, image, slot, node_id):
+        slot, node_id = slot[0], node_id[0]
+        saver = SelectiveImageSaver()
+        batches = [saver.preview(prompt=cls.hidden.prompt, extra_pnginfo=cls.hidden.extra_pnginfo,
+                                 **{slot: batch})["ui"]["previews"] for batch in image]
+        output = {"previews": [p for batch in batches for p in batch], "preview_slot": [slot], "preview_node": [node_id]}
+        if PromptServer.instance.client_id is not None:
+            PromptServer.instance.send_sync("executed", {
+                "node": node_id, "display_node": node_id, "output": output,
+                "prompt_id": get_executing_context().prompt_id,
+            }, PromptServer.instance.client_id)
+        return io.NodeOutput(image, batches, ui=output)
 
 
 def format_name(fmt, slot, batch, now):
@@ -153,9 +186,15 @@ async def last_previews(request):
     workflow, node = request.query["workflow"], request.query["node"]
     for entry in reversed(PromptServer.instance.prompt_queue.get_history().values()):
         extra_pnginfo = entry["prompt"][3].get("extra_pnginfo") or {}
+        if (extra_pnginfo.get("workflow") or {}).get("id") != workflow:
+            continue
         output = entry["outputs"].get(node)
-        if (extra_pnginfo.get("workflow") or {}).get("id") == workflow and output and "previews" in output:
+        if output and "previews" in output:
             return web.json_response(output["previews"])
+        previews = [p for output in entry["outputs"].values()
+                    if output.get("preview_node") == [node] for p in output.get("previews", [])]
+        if previews:
+            return web.json_response(previews)
     return web.json_response([])
 
 
@@ -175,6 +214,7 @@ async def pick_folder(request):
 
 NODE_CLASS_MAPPINGS = {
     "SelectiveImageSaver": SelectiveImageSaver,
+    "SavingToolsPreview": SavingToolsPreview,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {

@@ -3,9 +3,10 @@
 ## Selective Image Saver
 
 Node (catégorie `image`) qui affiche un aperçu de chaque image connectée et laisse choisir lesquelles enregistrer.
+Les aperçus apparaissent dès que chaque entrée est prête, pendant que les autres branches du workflow continuent.
 
 - **Entrées** : `image_1`, `image_2`, … Une nouvelle entrée apparaît dès que la dernière est connectée.
-- **Sorties** : une sortie `image_N` par entrée connectée, qui renvoie l'image telle quelle pour continuer le workflow.
+- **Sorties** : une sortie `image_N` par entrée connectée, qui renvoie l'image telle quelle dès qu'elle est prête, sans attendre les autres entrées. Une sortie peut alimenter une étape qui revient sur une autre entrée du même node.
 - **Nom** : format du nom des fichiers, commun à toutes les images du node (par défaut `ComfyUI_%counter%`) :
   - `%counter%` : numéro qui s'incrémente (`00001`, `00002`, …)
   - `%date%` ou `%date:yyyy-MM-dd hh-mm-ss%` : date et heure (`yyyy`, `yy`, `MM`, `dd`, `hh`, `mm`, `ss`)

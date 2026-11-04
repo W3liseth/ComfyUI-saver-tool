@@ -101,6 +101,39 @@ function previewUrl(preview) {
     return api.apiURL(`/view?${params}`);
 }
 
+// These nodes only exist in the submitted prompt; the editable workflow keeps its original connections.
+function addPreviewNodes(prompt) {
+    const outputs = new Map();
+    for (const [id, node] of Object.entries(prompt)) {
+        if (node.class_type !== "SelectiveImageSaver") continue;
+        const images = new Map();
+        outputs.set(id, images);
+        for (const [slot, source] of Object.entries(node.inputs)) {
+            if (!SLOT_RE.test(slot) || !Array.isArray(source)) continue;
+            const index = Number(slot.slice(6)) - 1;
+            const upstream = prompt[source[0]];
+            if (upstream?.class_type === "SavingToolsPreview" && upstream.inputs.node_id === id && upstream.inputs.slot === slot) {
+                images.set(index, source);
+                continue;
+            }
+            let previewId = `${id}:saving_tools:${slot}`;
+            while (prompt[previewId]) previewId += "_";
+            prompt[previewId] = { class_type: "SavingToolsPreview", inputs: { image: source, slot, node_id: id } };
+            node.inputs[slot] = [previewId, 0];
+            node.inputs[`preview_${slot}`] = [previewId, 1];
+            images.set(index, [previewId, 0]);
+        }
+    }
+    // Each output forwards its own image without waiting for the node's other inputs.
+    for (const node of Object.values(prompt)) {
+        for (const [name, source] of Object.entries(node.inputs)) {
+            if (!Array.isArray(source)) continue;
+            const image = outputs.get(source[0])?.get(source[1]);
+            if (image) node.inputs[name] = [...image];
+        }
+    }
+}
+
 // Picks the column count that shows the images the largest in the available area, like the core image preview,
 // then sizes each image frame so its size line sits right under the image.
 function layoutGallery(gallery) {
@@ -140,12 +173,15 @@ function layoutGallery(gallery) {
 // Rebuilds the previews only when the output's files changed, so cached reruns keep the save status.
 function syncPreviews(node, output) {
     const state = node.savingTools;
-    const key = (output?.previews ?? []).map((p) => p.filename).join("|");
+    const slot = output?.preview_slot?.[0];
+    const previews = slot ? { ...state.previews, [slot]: output.previews ?? [] } : {};
+    if (!slot) for (const p of output?.previews ?? []) (previews[p.slot] ??= []).push(p);
+    const key = Object.keys(previews).sort().flatMap((name) => previews[name].map((p) => p.filename)).join("|");
     if (key === state.previewKey) return;
     state.previewKey = key;
-    state.previews = {};
-    for (const p of output?.previews ?? []) (state.previews[p.slot] ??= []).push(p);
-    state.status = {};
+    state.previews = previews;
+    if (slot) delete state.status[slot];
+    else state.status = {};
     renderGallery(node);
     renderControls(node);
 }
@@ -316,6 +352,12 @@ app.registerExtension({
     name: "saving-tools.SelectiveImageSaver",
     setup() {
         document.head.append(el("style", { textContent: STYLE }));
+        const graphToPrompt = app.graphToPrompt;
+        app.graphToPrompt = async function () {
+            const prompt = await graphToPrompt.apply(this, arguments);
+            addPreviewNodes(prompt.output);
+            return prompt;
+        };
         // The queue status changes when a run is stored in the history, including runs that finished in another tab.
         api.addEventListener("status", () => {
             for (const node of app.rootGraph.nodes) if (node.savingTools) loadPreviews(node);
