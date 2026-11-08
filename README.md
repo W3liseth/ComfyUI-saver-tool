@@ -10,7 +10,7 @@ Les aperçus apparaissent dès que chaque entrée est prête, pendant que les au
 - **Nom** : format du nom des fichiers, commun à toutes les images du node (par défaut `ComfyUI_%counter%`) :
   - `%counter%` : numéro qui s'incrémente (`00001`, `00002`, …)
   - `%date%` ou `%date:yyyy-MM-dd hh-mm-ss%` : date et heure (`yyyy`, `yy`, `MM`, `dd`, `hh`, `mm`, `ss`)
-  - `%rand8%` : 8 lettres ou chiffres aléatoires, différents pour chaque image (`%rand4%`, `%rand12%`, … pour une autre longueur, jusqu'à 999)
+  - `%rand8%` : 8 lettres ou chiffres aléatoires, identiques pour toutes les images et entrées du node lors d'un même lancement du workflow, même avec des enregistrements séparés (`%rand4%`, `%rand6%`, `%rand12%`, … pour une autre longueur, jusqu'à 999). Un nouveau lancement donne une nouvelle valeur.
   - `%slot%` : nom de l'entrée (`image_1`, …)
   - `%batch%` : position de l'image dans le batch
 
@@ -18,6 +18,6 @@ Les aperçus apparaissent dès que chaque entrée est prête, pendant que les au
 - **Par image** :
   - le **dossier** : un clic ouvre la fenêtre Windows « Sélectionner un dossier » (Windows uniquement, sur le PC où tourne ComfyUI).
   - **Enregistrer** : copie l'aperçu dans le dossier. Si aucun dossier n'est choisi, la fenêtre s'ouvre d'abord.
-  - **Écraser** : remplace le dernier fichier enregistré depuis cette entrée par l'image actuelle.
+  - **Écraser** : remplace le dernier fichier enregistré depuis ce node par l'image actuelle, même s'il avait été enregistré depuis une autre entrée ou lors d'une génération précédente. Le chemin et le nom du fichier sont conservés.
 
 Les PNG enregistrés contiennent le workflow, comme avec le node Save Image. Les chemins et le nom du dernier fichier enregistré sont sauvegardés avec le workflow. Les aperçus, eux, restent dans le dossier temporaire de ComfyUI : si ComfyUI a redémarré, relancez le workflow avant d'enregistrer.

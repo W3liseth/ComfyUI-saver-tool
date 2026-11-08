@@ -148,11 +148,59 @@ class ProgressivePreviewsTest(unittest.TestCase):
         self.assertEqual(GeneratedImage.calls, [0.25, 0.75, 0.5])
         self.assertEqual([p["filename"] for p in current["image_1"]], [p["filename"] for p in original["image_1"]])
         self.assertNotEqual([p["filename"] for p in current["image_2"]], [p["filename"] for p in original["image_2"]])
-        entry = {"prompt": [None, None, None, {"extra_pnginfo": {"workflow": {"id": "workflow"}}}],
+        entry = {"prompt": [None, "test", None, {"extra_pnginfo": {"workflow": {"id": "workflow"}}}],
                  "outputs": self.executor.history_result["outputs"]}
         self.server.prompt_queue = SimpleNamespace(get_history=lambda: {"test": entry})
         response = asyncio.run(self.module.last_previews(SimpleNamespace(query={"workflow": "workflow", "node": "saver"})))
         self.assertEqual({p["slot"] for p in json.loads(response.text)}, {"image_1", "image_2", "image_4"})
+        self.assertEqual(response.headers["X-Saving-Tools-Run"], "test")
+
+    def test_history_refresh_waits_for_the_displayed_run(self):
+        def entry(run, filename):
+            return {
+                "prompt": [None, run, None, {"extra_pnginfo": {"workflow": {"id": "workflow"}}}],
+                "outputs": {"saver": {"previews": [{"filename": filename}]}},
+            }
+
+        running = [(0, "live")]
+        history = {"previous": entry("previous", "previous.png")}
+        self.server.prompt_queue = SimpleNamespace(
+            get_current_queue_volatile=lambda: (running, [(1, "queued")]), get_history=lambda: history,
+        )
+        request = SimpleNamespace(query={"workflow": "workflow", "node": "saver", "run": "live"})
+        response = asyncio.run(self.module.last_previews(request))
+        self.assertEqual(json.loads(response.text), [])
+
+        running[:] = [(1, "queued")]
+        history["live"] = entry("live", "live.png")
+        response = asyncio.run(self.module.last_previews(request))
+        self.assertEqual(json.loads(response.text), [{"filename": "live.png"}])
+        self.assertEqual(response.headers["X-Saving-Tools-Run"], "live")
+
+    def test_random_name_is_shared_across_slots_and_changes_for_a_new_run(self):
+        filenames = [f"saving_tools_{index:032x}.png" for index in range(2)]
+        for filename in filenames:
+            self.module.Image.new("RGB", (8, 8)).save(Path(self.temp.name) / filename)
+
+        async def save(slot, seed, fmt="%rand6%-%rand6%-%slot%-%batch%"):
+            async def body():
+                return {"files": filenames, "folder": str(Path(self.temp.name) / "saved"),
+                        "format": fmt, "slot": slot, "random_seed": seed}
+            response = await self.module.save_previews(SimpleNamespace(json=body))
+            self.assertEqual(response.status, 200)
+            return [Path(path).stem for path in json.loads(response.text)["files"]]
+
+        first = asyncio.run(save("image_1", "workflow:node:run1"))
+        second = asyncio.run(save("image_2", "workflow:node:run1"))
+        next_run = asyncio.run(save("image_1", "workflow:node:run2"))
+        value = first[0].split("-")[0]
+        self.assertEqual(len(value), 6)
+        for name in first + second:
+            self.assertEqual(name.split("-")[:2], [value, value])
+        self.assertNotEqual(next_run[0].split("-")[0], value)
+        # A format with only the random token still keeps all files without overwriting.
+        plain = asyncio.run(save("image_3", "workflow:node:run1", "%rand6%"))
+        self.assertEqual(plain, [value, f"{value}_00001"])
 
     def test_image_lists_keep_their_output_positions(self):
         self.prompt["first"]["class_type"] = "TestGeneratedImageList"
@@ -166,6 +214,27 @@ class ProgressivePreviewsTest(unittest.TestCase):
             self.assertIs(values["first"][index], values["fourth"][index])
         first_output = next(output for _, output in self.preview_events() if output["preview_slot"] == ["image_1"])
         self.assertEqual(len(first_output["previews"]), 4)
+
+    def test_overwrite_keeps_the_previous_path_when_slot_and_random_seed_change(self):
+        filenames = [f"saving_tools_{index:032x}.png" for index in range(2)]
+        for filename, color in zip(filenames, ("red", "blue")):
+            self.module.Image.new("RGB", (8, 8), color).save(Path(self.temp.name) / filename)
+
+        async def save(data):
+            async def body():
+                return data
+            response = await self.module.save_previews(SimpleNamespace(json=body))
+            self.assertEqual(response.status, 200)
+            return json.loads(response.text)["files"]
+
+        folder = Path(self.temp.name) / "saved"
+        original = asyncio.run(save({"files": filenames[:1], "folder": str(folder),
+                                    "format": "%rand6%", "slot": "image_1", "random_seed": "run1"}))
+        overwritten = asyncio.run(save({"files": filenames[1:], "overwrite": original,
+                                       "format": "%rand6%", "slot": "image_2", "random_seed": "run2"}))
+        self.assertEqual(overwritten, original)
+        self.assertEqual(list(folder.iterdir()), [Path(original[0])])
+        self.assertEqual(Path(original[0]).read_bytes(), (Path(self.temp.name) / filenames[1]).read_bytes())
 
     def test_output_can_generate_a_later_input_of_the_same_saver(self):
         self.prompt["second"]["inputs"]["previous"] = ["saver", 0]

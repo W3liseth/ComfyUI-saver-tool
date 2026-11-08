@@ -90,7 +90,7 @@ class SelectiveImageSaver:
                 previews.append({"slot": f"image_{slot}", "filename": filename, "subfolder": "", "type": "temp", "workflow": workflow})
 
         result = tuple(images.get(i) for i in range(1, max(images, default=0) + 1))
-        return {"ui": {"previews": previews}, "result": result}
+        return {"ui": {"previews": previews, "preview_run": [get_executing_context().prompt_id]}, "result": result}
 
 
 class SavingToolsPreview(io.ComfyNode):
@@ -112,7 +112,8 @@ class SavingToolsPreview(io.ComfyNode):
         saver = SelectiveImageSaver()
         batches = [saver.preview(prompt=cls.hidden.prompt, extra_pnginfo=cls.hidden.extra_pnginfo,
                                  **{slot: batch})["ui"]["previews"] for batch in image]
-        output = {"previews": [p for batch in batches for p in batch], "preview_slot": [slot], "preview_node": [node_id]}
+        output = {"previews": [p for batch in batches for p in batch], "preview_slot": [slot], "preview_node": [node_id],
+                  "preview_run": [get_executing_context().prompt_id]}
         if PromptServer.instance.client_id is not None:
             PromptServer.instance.send_sync("executed", {
                 "node": node_id, "display_node": node_id, "output": output,
@@ -169,7 +170,13 @@ async def save_previews(request):
             return web.json_response({"error": "Choisissez un dossier de destination."}, status=400)
 
     now = datetime.now()
-    names = [format_name(data["format"], data["slot"], i + 1, now) for i in range(len(sources))]
+    rng = random.Random(data.get("random_seed"))
+    random_values = {}
+    for match in RAND_RE.finditer(data["format"]):
+        if match.group() not in random_values:
+            random_values[match.group()] = "".join(rng.choices(RAND_CHARS, k=int(match.group(1))))
+    fmt = RAND_RE.sub(lambda m: random_values[m.group()], data["format"])
+    names = [format_name(fmt, data["slot"], i + 1, now) for i in range(len(sources))]
     try:
         os.makedirs(folder, exist_ok=True)
         targets += free_files(folder, names[len(targets):])
@@ -184,17 +191,23 @@ async def save_previews(request):
 async def last_previews(request):
     # The last finished run of this node in this workflow, so the frontend can show it again after a tab switch.
     workflow, node = request.query["workflow"], request.query["node"]
-    for entry in reversed(PromptServer.instance.prompt_queue.get_history().values()):
+    queue = PromptServer.instance.prompt_queue
+    if (run := request.query.get("run")):
+        running, _ = queue.get_current_queue_volatile()
+        if any(item[1] == run for item in running):
+            # A queue update can arrive after a live preview but before that run reaches history.
+            return web.json_response([])
+    for entry in reversed(queue.get_history().values()):
         extra_pnginfo = entry["prompt"][3].get("extra_pnginfo") or {}
         if (extra_pnginfo.get("workflow") or {}).get("id") != workflow:
             continue
         output = entry["outputs"].get(node)
         if output and "previews" in output:
-            return web.json_response(output["previews"])
+            return web.json_response(output["previews"], headers={"X-Saving-Tools-Run": entry["prompt"][1]})
         previews = [p for output in entry["outputs"].values()
                     if output.get("preview_node") == [node] for p in output.get("previews", [])]
         if previews:
-            return web.json_response(previews)
+            return web.json_response(previews, headers={"X-Saving-Tools-Run": entry["prompt"][1]})
     return web.json_response([])
 
 

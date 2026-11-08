@@ -11,7 +11,7 @@ const FORMAT_HELP = [
     "Nom des fichiers enregistrés, pour toutes les images de ce node (sans .png).",
     "%counter% : numéro qui s'incrémente (00001, 00002…)",
     "%date% ou %date:yyyy-MM-dd hh-mm-ss% : date et heure",
-    "%rand8% : 8 lettres ou chiffres aléatoires (%rand4%, %rand12%… pour une autre longueur)",
+    "%rand8% : 8 lettres ou chiffres aléatoires, communs à toutes les entrées pour ce lancement du workflow (%rand4%, %rand12%…)",
     "%slot% : nom de l'entrée (image_1…)",
     "%batch% : position de l'image dans le batch",
     "Si le nom existe déjà, un numéro est ajouté : seul « Écraser » remplace un fichier.",
@@ -173,6 +173,7 @@ function layoutGallery(gallery) {
 // Rebuilds the previews only when the output's files changed, so cached reruns keep the save status.
 function syncPreviews(node, output) {
     const state = node.savingTools;
+    if (output?.preview_run?.[0]) state.namingRun = output.preview_run[0];
     const slot = output?.preview_slot?.[0];
     const previews = slot ? { ...state.previews, [slot]: output.previews ?? [] } : {};
     if (!slot) for (const p of output?.previews ?? []) (previews[p.slot] ??= []).push(p);
@@ -193,9 +194,11 @@ async function loadPreviews(node) {
     const state = node.savingTools;
     const version = state.version;
     const params = new URLSearchParams({ workflow: node.graph.id, node: String(node.id) });
-    const previews = await (await api.fetchApi(`/saving_tools/previews?${params}`)).json();
+    if (state.namingRun) params.set("run", state.namingRun);
+    const response = await api.fetchApi(`/saving_tools/previews?${params}`);
+    const previews = await response.json();
     // A newer run shown by onExecuted meanwhile wins over the history.
-    if (version === state.version && previews.length) syncPreviews(node, { previews });
+    if (version === state.version && previews.length) syncPreviews(node, { previews, preview_run: [response.headers.get("X-Saving-Tools-Run")] });
 }
 
 function renderGallery(node) {
@@ -269,12 +272,18 @@ async function pickFolder(node, slot) {
     return folder;
 }
 
+function overwriteFiles(node) {
+    return node.properties.lastSavedFiles ?? Object.values(node.properties.lastSaved ?? {}).at(-1);
+}
+
 async function save(node, slot, overwrite) {
     const state = node.savingTools;
     const lastSaved = (node.properties.lastSaved ??= {});
-    const body = { files: state.previews[slot].map((p) => p.filename), format: node.properties.filenameFormat, slot };
+    const run = state.namingRun ??= crypto.randomUUID();
+    const body = { files: state.previews[slot].map((p) => p.filename), format: node.properties.filenameFormat, slot,
+        random_seed: `${node.graph.id}:${node.id}:${run}` };
     if (overwrite) {
-        body.overwrite = lastSaved[slot];
+        body.overwrite = overwriteFiles(node);
     } else {
         body.folder = node.properties.savingPaths?.[slot] || (await pickFolder(node, slot));
         if (!body.folder) return;
@@ -285,6 +294,7 @@ async function save(node, slot, overwrite) {
     renderControls(node);
     try {
         lastSaved[slot] = (await post("/saving_tools/save", body)).files;
+        node.properties.lastSavedFiles = lastSaved[slot];
         markChanged();
         state.status[slot] = { text: `Enregistré : ${fileNames(lastSaved[slot])}`, title: lastSaved[slot].join("\n") };
     } catch (error) {
@@ -299,6 +309,7 @@ function controlRow(node, slot) {
     const hasPreview = !!state.previews[slot]?.length;
     const folder = node.properties.savingPaths?.[slot];
     const last = node.properties.lastSaved?.[slot];
+    const overwrite = overwriteFiles(node);
     const connected = imageInputs(node).find((input) => input.name === slot)?.link != null;
 
     let note = state.status[slot];
@@ -320,8 +331,8 @@ function controlRow(node, slot) {
         }),
         el("button", {
             textContent: "Écraser",
-            title: last?.length ? `Écraser la dernière image enregistrée : ${last.join(", ")}` : "Aucune image enregistrée pour cette entrée",
-            disabled: !hasPreview || !last?.length || state.busy[slot],
+            title: overwrite?.length ? `Écraser la dernière image enregistrée depuis ce node : ${overwrite.join(", ")}` : "Aucune image enregistrée depuis ce node",
+            disabled: !hasPreview || !overwrite?.length || state.busy[slot],
             onclick: () => save(node, slot, true),
         }),
     ];
